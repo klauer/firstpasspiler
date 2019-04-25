@@ -1,7 +1,8 @@
 import collections
 import inspect
-import textwrap
 import pathlib
+import re
+import textwrap
 
 import inflection
 
@@ -26,8 +27,47 @@ def debug(cursor):
             print(attr, val)
 
 
+def dumb_rename_all(c_name):
+    all_known_names = dumb_rename_all.all_known_names
+    simple_renames = dumb_rename_all.simple_renames
+
+    def get_name(part):
+        if part in simple_renames:
+            return simple_renames[part]
+        elif part.startswith('m_'):
+            # apply advanced heuristics
+            part = part[1:]
+
+        return (part
+                if part in all_known_names
+                else inflection.underscore(part)
+                )
+
+    ret = '.'.join(get_name(part)
+                   for part in c_name.split('.'))
+    # print(c_name, '->', ret)
+    return ret
+
+# TODO
+dumb_rename_all.all_known_names = set()
+dumb_rename_all.simple_renames = {
+    'nullptr': 'None',
+    'true': 'True',
+    'false': 'False',
+}
+
+
+def rename(c_name):
+    return inflection.underscore(c_name)
+
+
 def find_classes(cursor):
-    return list(find_kind(cursor, CursorKind.CLASS_DECL))
+    return (list(find_kind(cursor, CursorKind.CLASS_DECL)) +
+            list(find_kind(cursor, CursorKind.STRUCT_DECL)))
+
+
+def find_functions(cursor):
+    return list(find_kind(cursor, CursorKind.FUNCTION_DECL))
 
 
 def find_methods(cursor):
@@ -121,7 +161,7 @@ class Argument(Base):
     def parse(self, cursor):
         self.type = Type(cursor.type, parent=self)
         self.c_name = cursor.spelling
-        self.name = inflection.underscore(self.c_name)
+        self.name = rename(self.c_name)
         if not self.name:
             self.name = inflection.underscore(
                 self.type.name.split('.')[-1]
@@ -132,6 +172,8 @@ class Argument(Base):
 
 
 class Method(Base):
+    allow_self_arg = True   # TODO
+
     def parse(self, cursor):
         self.c_name = cursor.spelling
         can_rename = self.c_name not in self.parent.python_base_attrs
@@ -144,8 +186,12 @@ class Method(Base):
             'operator<': '__lt__',
             'operator<=': '__le__',
         }
-        if can_rename:
-            self.name = inflection.underscore(
+        if cursor.kind == CursorKind.CONSTRUCTOR:
+            self.name = '__init__'
+        elif cursor.kind == CursorKind.DESTRUCTOR:
+            self.name = '__del__'
+        elif can_rename:
+            self.name = rename(
                 special_names.get(cursor.spelling, cursor.spelling)
             )
         else:
@@ -161,14 +207,9 @@ class Method(Base):
         self.has_retval = (cursor.result_type.spelling != 'void')
         self.result_type = Type(cursor.result_type, parent=self)
         self.comments = self.build_comments(cursor)
-        if not cursor.is_static_method():
+        if not cursor.is_static_method() and self.allow_self_arg:
             self.args.insert(0, SelfArgument(None, parent=self))
 
-        self.identifier_map = self.parent.identifier_map.copy()
-        self.identifier_map.update(**{
-            attr: Identifier(attr, f'self.{attr}', None)
-            for attr in self.parent.python_base_attrs
-        })
         self._source = None
 
     @property
@@ -178,6 +219,11 @@ class Method(Base):
     @property
     def source(self):
         if self._source is None:
+            self.identifier_map = self.parent.identifier_map.copy()
+            self.identifier_map.update(**{
+                attr: Identifier(attr, f'self.{attr}', None)
+                for attr in self.parent.python_base_attrs
+            })
             self._source = self.get_source(self.cursor)
         return self._source
 
@@ -248,7 +294,7 @@ class Method(Base):
             while tokens and tokens[0].cursor.hash != cursor.hash:
                 tokens.popleft()
 
-        def keyword_handler(token, keyword):
+        def keyword_handler(token, next_token, keyword):
             nonlocal insert_at_newline
             nonlocal braces
             if keyword == 'for':
@@ -278,28 +324,53 @@ class Method(Base):
                     ))
                     braces -= 1
                     skip_to_cursor(contents)
-            elif keyword in ('while', 'do', 'if', 'else', 'else if'):
-                insert_at_newline = ':'
-                # blah...
-                source.append(f'{keyword} ')
+            elif keyword in ('true', ):
+                source.append('True')
+            elif keyword in ('false', ):
+                source.append('False')
+            elif keyword in ('nullptr', ):
+                source.append('None')
+            elif keyword in ('new', 'auto'):
+                source.append('')
             else:
-                source.append(f'{keyword} ')
+                if keyword in ('while', 'do', 'if', 'else', 'else if'):
+                    insert_at_newline = ':'
+                source.append(keyword)
+                if (next_token and next_token.spelling and
+                        next_token.spelling[0].isalnum()):
+                    source.append(' ')
 
         def check_identifier(identifier, context):
-            if identifier in context:
-                identifier = context[identifier].name
-            elif '.' in identifier:
-                prefix, suffix = identifier.split('.', 1)
-                if prefix in context:
-                    prefix = context[prefix]
-                    if (prefix.obj is not None and
-                            hasattr(prefix.obj, 'identifier_map')):
-                        print('doublesuffix!', prefix, suffix, prefix.obj.name,
-                              prefix.obj.identifier_map.keys())
-                        suffix = check_identifier(suffix,
-                                                  prefix.obj.identifier_map)
-                    identifier = f'{prefix}.{suffix}'
-            return identifier
+            first, *remainder = identifier.split('.')
+            if first == 'this':
+                if remainder:
+                    return check_identifier('.'.join(remainder), context)
+                return 'self'
+
+            if first in context:
+                if not remainder:
+                    return context[first].name
+                return '.'.join((context[first].name,
+                                 dumb_rename_all('.'.join(remainder))))
+
+            return dumb_rename_all(identifier.strip())
+
+        def lookahead_punctuation(tokens):
+            punctuation = ''
+            ate = []
+            for token in tokens:
+                spelling = token.spelling
+                if token.kind == TokenKind.PUNCTUATION:
+                    spelling = punctuation_map.get(spelling, spelling)
+                    if spelling in '{}\n':
+                        break
+
+                    ate.append(token)
+                    punctuation += spelling
+                else:
+                    break
+
+            return ate, punctuation
 
         def lookahead_identifiers(tokens):
             identifier = ''
@@ -341,7 +412,11 @@ class Method(Base):
                     self.saw_python_objects.add(identifier)
                 source.append(identifier_map.get(identifier, identifier))
             elif kind == TokenKind.KEYWORD:
-                keyword_handler(token, spelling)
+                try:
+                    next_token = tokens[0]
+                except IndexError:
+                    next_token = None
+                keyword_handler(token, next_token, spelling)
             elif kind == TokenKind.PUNCTUATION:
                 if spelling == '{':
                     braces += 1
@@ -354,7 +429,17 @@ class Method(Base):
                 if spelling == '\n':
                     newline()
                 else:
-                    source.append(spelling)
+                    ate, punctuation = lookahead_punctuation([token, *tokens])
+                    for skip in ate[1:]:
+                        tokens.popleft()
+                    punctuation = re.sub('\s*\&\&\s*', ' and ', punctuation)
+                    punctuation = re.sub('\s*\|\|\s*', ' or ', punctuation)
+                    punctuation = re.sub('\s*==\s*', ' == ', punctuation)
+                    punctuation = re.sub('\s*!=\s*', ' != ', punctuation)
+                    punctuation = re.sub('\s*!\s*', ' not ', punctuation)
+                    punctuation = re.sub('\s*:\s*', ' COLON ', punctuation)
+                    source.append(punctuation)
+
                 # TODO: &&, ||, << ...
             else:
                 source.append(spelling)
@@ -372,7 +457,7 @@ class Method(Base):
         if cursor.brief_comment:
             comment = cursor.brief_comment
         else:
-            comment = f'{self.name}'
+            comment = self.name.replace('_', ' ').capitalize()
 
         comments = ["'''",
                     comment,
@@ -413,6 +498,10 @@ def {self.name}({arg_str}){return_annotation}:
 """
 
 
+class Function(Method):
+    allow_self_arg = False   # TODO
+
+
 class BaseClass(Base):
     def parse(self, cursor):
         name = cursor.spelling
@@ -442,7 +531,7 @@ class Identifier:
 class Field(Base):
     def parse(self, cursor):
         self.c_name = cursor.spelling
-        self.name = inflection.underscore(self.c_name)
+        self.name = rename(self.c_name)
         if self.name.startswith('m_'):
             # apply advanced heuristics
             self.name = self.name[1:]
@@ -529,6 +618,51 @@ class Class(BaseClass):
                          if line)
 
 
+class FunctionContainer:
+    def __init__(self, cursor, skip_prefixes=None):
+        self.cursor = cursor
+        self.name = '__init__'
+        self.c_name = '__init__'
+        self.python_base_attrs = {}
+        self.python_base_namespace = {}
+        self.identifier_map = {}
+        self.fields = {}
+        self.saw_python_objects = {}
+        self.functions = []
+
+        if skip_prefixes is None:
+            skip_prefixes = ('qt_', 'q_', 'operator')
+
+        for cursor in find_functions(cursor):
+            if not any(cursor.spelling.startswith(prefix)
+                       for prefix in skip_prefixes):
+                func = Function(cursor, parent=self)
+                self.functions.append(func)
+                self.identifier_map[func.c_name] = Identifier(
+                    func.c_name, func.name, func,
+                    type_=func.result_type)
+
+        self.saw_python_objects = set()
+        for func in self.functions:
+            self.saw_python_objects |= func.saw_python_objects
+
+    @property
+    def methods(self):
+        # compat with Class...
+        return self.functions
+
+    @property
+    def functions_to_output(self):
+        for func in self.functions:
+            # if func.name not in self.skip_funcs or func.source_body:
+            fn = func.cursor.location.file.name
+            if fn and fn.startswith('/Users/klauer/docs/Repos/firstpasspiler'):
+                yield func
+
+    def __repr__(self):
+        return '\n'.join(repr(func) for func in self.functions_to_output)
+
+
 def remove_known_namespaces(name):
     for namespace in project_namespaces:
         if name.startswith(namespace):
@@ -546,6 +680,18 @@ def build_namespace(modules):
     return namespace
 
 
+def get_all_names(items):
+    all_names = set()
+    for item in items:
+        for attr in dir(item):
+            obj = getattr(item, attr)
+            all_names.add(attr)
+            if inspect.isclass(obj):
+                all_names = all_names.union(dir(obj))
+
+    return all_names
+
+
 def prune_classes(classes):
     # i'm sure there's a way around this, but i can't find the API
     # to get just the class definition
@@ -557,6 +703,17 @@ def prune_classes(classes):
             current = clsdict[cls.name]
             if len(cls.methods) > len(current.methods):
                 clsdict[cls.name] = cls
+    # for name, cls in list(clsdict.items()):
+    #     file_ = cls.cursor.location.file
+    #     print(file_)
+    #     if file_:
+    #         fn = file_.name
+    #         # TODO: remove; only keeps struct?
+    #         if fn and fn.startswith('/Users/klauer/docs/Repos/firstpasspiler'):
+    #             continue
+    #     elif name.startswith('C'):
+    #         continue
+    #     del clsdict[name]
     return clsdict
 
 
@@ -607,17 +764,25 @@ def parse(source_path, args=None, index=None, python_base_namespace=None):
         raise RuntimeError('No cpp files found')
 
     combined = pathlib.Path('.') / 'combined_source.cpp'
+    combined = combined.absolute()
+
     with open(combined, 'wt') as f:
         f.write('\n'.join(combined_source))
 
     if index is None:
         index = clang.cindex.Index.create()
+
+    # print(combined)
     tu = index.parse(str(combined), args=args)
     root = tu.cursor
 
     all_classes = []
 
+    functions = FunctionContainer(root)
+    all_classes.append(functions)
+
     for cursor in find_classes(root):
+        # print('cls', cursor.spelling)
         # if '.cpp' in str(cursor.location):
         if not cursor.spelling.startswith('Q'):
             cls = Class(cursor, parent=None,
@@ -626,7 +791,6 @@ def parse(source_path, args=None, index=None, python_base_namespace=None):
                 all_classes.append(cls)
 
     clsdict = prune_classes(all_classes)
-
     return clsdict
 
 
