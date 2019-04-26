@@ -219,7 +219,18 @@ class Method(Base):
     @property
     def source(self):
         if self._source is None:
-            self.identifier_map = self.parent.identifier_map.copy()
+            parents = []
+
+            parent = self
+            while parent:
+                parent = parent.parent
+                if parent is not None:
+                    parents.append(parent)
+
+            self.identifier_map = {}
+            for parent in reversed(parents):
+                self.identifier_map.update(parent.identifier_map)
+
             self.identifier_map.update(**{
                 attr: Identifier(attr, f'self.{attr}', None)
                 for attr in self.parent.python_base_attrs
@@ -269,8 +280,8 @@ class Method(Base):
         identifier_map['this'] = Identifier('this', 'self', self)
 
         punctuation_map = {
-            '++': ' += 1 #increment# ',
-            '--': ' -= 1 #decrement# ',
+            '++': '.increment() ',
+            '--': '.decrement() ',
             ',': ', ',
             '=': ' = ',
             '::': '.',
@@ -353,7 +364,7 @@ class Method(Base):
                 return '.'.join((context[first].name,
                                  dumb_rename_all('.'.join(remainder))))
 
-            return dumb_rename_all(identifier.strip())
+            return dumb_rename_all(identifier)
 
         def lookahead_punctuation(tokens):
             punctuation = ''
@@ -548,6 +559,7 @@ class Class(BaseClass):
         self.python_base_namespace = python_base_namespace
         super().__init__(cursor, parent=parent)
 
+        self.c_name = cursor.spelling
         self.saw_python_objects = set()
         for method in self.methods:
             self.saw_python_objects |= method.saw_python_objects
@@ -620,6 +632,7 @@ class Class(BaseClass):
 
 class FunctionContainer:
     def __init__(self, cursor, skip_prefixes=None):
+        self.parent = None
         self.cursor = cursor
         self.name = '__init__'
         self.c_name = '__init__'
@@ -703,17 +716,20 @@ def prune_classes(classes):
             current = clsdict[cls.name]
             if len(cls.methods) > len(current.methods):
                 clsdict[cls.name] = cls
-    # for name, cls in list(clsdict.items()):
-    #     file_ = cls.cursor.location.file
-    #     print(file_)
-    #     if file_:
-    #         fn = file_.name
-    #         # TODO: remove; only keeps struct?
-    #         if fn and fn.startswith('/Users/klauer/docs/Repos/firstpasspiler'):
-    #             continue
-    #     elif name.startswith('C'):
-    #         continue
-    #     del clsdict[name]
+    for name, cls in list(clsdict.items()):
+        file_ = cls.cursor.location.file
+        print(file_)
+        if not file_:
+            continue
+
+        if file_:
+            fn = file_.name
+            if fn and (
+                    fn.endswith('combined_source.cpp') or
+                    fn.startswith('/Users/klauer/Repos/Qt-Advanced-Docking-System')
+            ):
+                continue
+        del clsdict[name]
     return clsdict
 
 
@@ -785,8 +801,10 @@ def parse(source_path, args=None, index=None, python_base_namespace=None):
         # print('cls', cursor.spelling)
         # if '.cpp' in str(cursor.location):
         if not cursor.spelling.startswith('Q'):
-            cls = Class(cursor, parent=None,
+            cls = Class(cursor, parent=functions,
                         python_base_namespace=python_base_namespace)
+            functions.identifier_map[cls.c_name] = Identifier(cls.c_name,
+                                                              cls.name, None)
             if cls.name and cls.name[0].isupper():
                 all_classes.append(cls)
 
@@ -837,6 +855,9 @@ def write_output(clsdict, output_path, *, python_base_modules=None):
               f'imports {len(cls.saw_python_objects)}')
         with open(output_path / f'{inflection.underscore(name)}.py',
                   'wt') as f:
+            print(f'# Location: {cls.cursor.location}', file=f)
+            if cls.cursor.location.file:
+                print(f'# Filename: {cls.cursor.location.file.name}', file=f)
             imports = set(cls.saw_python_objects)
             for module in python_base_modules:
                 per_module_imports = [
