@@ -61,6 +61,9 @@ dumb_rename_all.all_known_names = get_all_names(python_base_modules)
 dumb_rename_all.simple_renames.update(
     {'_this': 'public',
      'next': 'next_',
+     'from': 'from_',
+     'in': 'in_',
+     'format': 'format_',
      }
 )
 

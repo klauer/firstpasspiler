@@ -245,6 +245,30 @@ def lookahead_identifiers(tokens, identifier_map):
     identifier = get_identifier(identifier, identifier_map)
     return ate, identifier
 
+keyword_map = {
+    'auto': '',
+    'bool': '',
+    'case': 'if _ ==',
+    'char': '',
+    'const': '',
+    'default': 'else:',
+    'delete': 'del',
+    'double': '',
+    'dynamic_cast': '',
+    'false': 'False',
+    'float': '',
+    'inline': '',
+    'int': '',
+    'new': '',
+    'nullptr': 'None',
+    'static': '',
+    'static_cast': '',
+    'this': 'self',
+    'true': 'True',
+    'unsigned': '',
+    'void': '',
+}
+
 
 class Method(Base):
     allow_self_arg = True   # TODO
@@ -402,19 +426,13 @@ class Method(Base):
                     ))
                     braces -= 1
                     skip_to_cursor(contents)
-            elif keyword in ('true', ):
-                source.append('True')
-            elif keyword in ('false', ):
-                source.append('False')
-            elif keyword in ('nullptr', ):
-                source.append('None')
-            elif keyword in ('new', 'auto'):
-                source.append('')
-            else:
-                if keyword in ('while', 'do', 'if', 'else', 'else if'):
-                    insert_at_newline = ':'
+            elif keyword in ('while', 'do', 'if', 'else', 'else if'):
+                insert_at_newline = ':'
                 source.append(keyword)
-                if (next_token and next_token.spelling and
+            else:
+                keyword = keyword_map.get(keyword, keyword)
+                source.append(keyword)
+                if (keyword and next_token and next_token.spelling and
                         next_token.spelling[0].isalnum()):
                     source.append(' ')
 
