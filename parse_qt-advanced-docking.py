@@ -59,7 +59,7 @@ args = [
 python_namespace = build_namespace(python_base_modules)
 dumb_rename_all.all_known_names = get_all_names(python_base_modules)
 dumb_rename_all.simple_renames.update(
-    {'this_': 'public',
+    {'_this': 'public',
      'next': 'next_',
      }
 )

@@ -171,6 +171,81 @@ class Argument(Base):
         return f'{self.name}: {self.type}'
 
 
+def check_identifier(identifier, context):
+    first, *remainder = identifier.split('.')
+    if first == 'this':
+        if remainder:
+            return check_identifier('.'.join(remainder), context)
+        return 'self'
+
+    if first in context:
+        if not remainder:
+            return context[first].name
+        return '.'.join((context[first].name,
+                         dumb_rename_all('.'.join(remainder))))
+
+    return dumb_rename_all(identifier)
+
+
+def get_identifier(identifier, context):
+    identifier = check_identifier(identifier, context)
+    return '.'.join(
+        dumb_rename_all.simple_renames.get(part, part)
+        for part in identifier.split('.'))
+
+
+punctuation_map = {
+    '++': '.increment() ',
+    '--': '.decrement() ',
+    ',': ', ',
+    '=': ' = ',
+    '::': '.',
+    '->': '.',
+    ';': '\n',
+    '{': '\n',
+    '}': '\n',
+}
+
+
+def lookahead_punctuation(tokens):
+    punctuation = ''
+    ate = []
+    for token in tokens:
+        spelling = token.spelling
+        if token.kind == TokenKind.PUNCTUATION:
+            spelling = punctuation_map.get(spelling, spelling)
+            if spelling in '{}\n':
+                break
+
+            ate.append(token)
+            punctuation += spelling
+        else:
+            break
+
+    return ate, punctuation
+
+
+def lookahead_identifiers(tokens, identifier_map):
+    identifier = ''
+    ate = []
+    for token in tokens:
+        spelling = token.spelling
+        if token.kind == TokenKind.IDENTIFIER:
+            identifier += spelling
+            ate.append(token)
+        elif token.kind == TokenKind.PUNCTUATION:
+            if spelling in ('.', '->', '::'):
+                identifier += '.'
+                ate.append(token)
+            else:
+                break
+        else:
+            break
+
+    identifier = get_identifier(identifier, identifier_map)
+    return ate, identifier
+
+
 class Method(Base):
     allow_self_arg = True   # TODO
 
@@ -283,18 +358,6 @@ class Method(Base):
 
         identifier_map['this'] = Identifier('this', 'self', self)
 
-        punctuation_map = {
-            '++': '.increment() ',
-            '--': '.decrement() ',
-            ',': ', ',
-            '=': ' = ',
-            '::': '.',
-            '->': '.',
-            ';': '\n',
-            '{': '\n',
-            '}': '\n',
-        }
-
         insert_at_newline = ''
 
         def newline():
@@ -355,58 +418,6 @@ class Method(Base):
                         next_token.spelling[0].isalnum()):
                     source.append(' ')
 
-        def check_identifier(identifier, context):
-            first, *remainder = identifier.split('.')
-            if first == 'this':
-                if remainder:
-                    return check_identifier('.'.join(remainder), context)
-                return 'self'
-
-            if first in context:
-                if not remainder:
-                    return context[first].name
-                return '.'.join((context[first].name,
-                                 dumb_rename_all('.'.join(remainder))))
-
-            return dumb_rename_all(identifier)
-
-        def lookahead_punctuation(tokens):
-            punctuation = ''
-            ate = []
-            for token in tokens:
-                spelling = token.spelling
-                if token.kind == TokenKind.PUNCTUATION:
-                    spelling = punctuation_map.get(spelling, spelling)
-                    if spelling in '{}\n':
-                        break
-
-                    ate.append(token)
-                    punctuation += spelling
-                else:
-                    break
-
-            return ate, punctuation
-
-        def lookahead_identifiers(tokens):
-            identifier = ''
-            ate = []
-            for token in tokens:
-                spelling = token.spelling
-                if token.kind == TokenKind.IDENTIFIER:
-                    identifier += spelling
-                    ate.append(token)
-                elif token.kind == TokenKind.PUNCTUATION:
-                    if spelling in ('.', '->', '::'):
-                        identifier += '.'
-                        ate.append(token)
-                    else:
-                        break
-                else:
-                    break
-
-            identifier = check_identifier(identifier, identifier_map)
-            return ate, identifier
-
         def consume(token):
             nonlocal source
             nonlocal braces
@@ -420,7 +431,8 @@ class Method(Base):
                 source.append(f'# {spelling}')
                 newline()
             elif kind == TokenKind.IDENTIFIER:
-                ate, identifier = lookahead_identifiers([token, *tokens])
+                ate, identifier = lookahead_identifiers(
+                    [token, *tokens], identifier_map)
                 for skip in ate[1:]:
                     tokens.popleft()
                 if identifier in self.parent.python_base_namespace:
