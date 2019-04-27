@@ -603,11 +603,15 @@ class Class(BaseClass):
                     'qt_metacall', 'metaObject',
                     ]
 
+    class_renames = {}
+
     def __init__(self, cursor, *, python_base_namespace=None, parent=None):
         self.python_base_namespace = python_base_namespace
         super().__init__(cursor, parent=parent)
 
         self.c_name = cursor.spelling
+        self.name = self.class_renames.get(self.name, self.name)
+
         self.saw_python_objects = set()
         for method in self.methods:
             self.saw_python_objects |= method.saw_python_objects
