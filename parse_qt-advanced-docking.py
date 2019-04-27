@@ -8,7 +8,8 @@ from qtpy.QtCore import Qt
 import collections
 import inspect
 
-from fpp import parse, write_output, build_namespace, get_all_names, dumb_rename_all
+from fpp import (parse, write_output, build_namespace, get_all_names,
+                 dumb_rename_all, Identifier)
 from PyQt5 import (Qt, QtBluetooth, QtCore, QtDesigner, QtGui, QtHelp,
                    QtMultimedia, QtMultimediaWidgets, QtNetwork,
                    QtNfc, QtOpenGL, QtPrintSupport, QtQml, QtQuick,
@@ -64,10 +65,16 @@ dumb_rename_all.simple_renames.update(
      'from': 'from_',
      'in': 'in_',
      'format': 'format_',
+     'super': 'super()',
      }
 )
 
-clsdict = parse(source_path, args=args, python_base_namespace=python_namespace)
+identifiers = {
+    'emit': Identifier('emit', '[emit_TODO]', None),
+}
+
+clsdict = parse(source_path, args=args, python_base_namespace=python_namespace,
+                base_identifier_map=identifiers)
 
 os.makedirs('output', exist_ok=True)
 write_output(clsdict, 'output', python_base_modules=python_base_modules)

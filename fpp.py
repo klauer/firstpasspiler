@@ -228,22 +228,33 @@ def lookahead_punctuation(tokens):
 def lookahead_identifiers(tokens, identifier_map):
     identifier = ''
     ate = []
+    insert_after = ''
     for token in tokens:
         spelling = token.spelling
         if token.kind == TokenKind.IDENTIFIER:
+            if ate and ate[-1].kind == TokenKind.IDENTIFIER:
+                # space between
+                insert_after = ' '
+                break
+
             identifier += spelling
             ate.append(token)
         elif token.kind == TokenKind.PUNCTUATION:
             if spelling in ('.', '->', '::'):
                 identifier += '.'
                 ate.append(token)
+            elif spelling in (' ', ):
+                break
             else:
                 break
         else:
             break
 
+    old = identifier
     identifier = get_identifier(identifier, identifier_map)
-    return ate, identifier
+    print(old, '->', identifier, [tok.spelling for tok in ate])
+    return ate, identifier, insert_after
+
 
 keyword_map = {
     'auto': '',
@@ -255,6 +266,7 @@ keyword_map = {
     'delete': 'del',
     'double': '',
     'dynamic_cast': '',
+    'else if': 'elif',
     'false': 'False',
     'float': '',
     'inline': '',
@@ -384,9 +396,9 @@ class Method(Base):
 
         insert_at_newline = ''
 
-        def newline():
+        def newline(force_newline_insert=False):
             nonlocal insert_at_newline
-            if insert_at_newline and braces > 0:
+            if insert_at_newline and (braces > 0 or force_newline_insert):
                 source.append(insert_at_newline)
                 insert_at_newline = ''
 
@@ -444,18 +456,21 @@ class Method(Base):
             spelling = token.spelling
             kind = token.kind
             if kind == TokenKind.COMMENT:
+                if insert_at_newline:
+                    newline(force_newline_insert=True)
                 spelling = spelling.lstrip(' /')
                 newline()
                 source.append(f'# {spelling}')
                 newline()
             elif kind == TokenKind.IDENTIFIER:
-                ate, identifier = lookahead_identifiers(
+                ate, identifier, insert_after = lookahead_identifiers(
                     [token, *tokens], identifier_map)
                 for skip in ate[1:]:
                     tokens.popleft()
                 if identifier in self.parent.python_base_namespace:
                     self.saw_python_objects.add(identifier)
                 source.append(identifier_map.get(identifier, identifier))
+                source.append(insert_after)
             elif kind == TokenKind.KEYWORD:
                 try:
                     next_token = tokens[0]
@@ -483,9 +498,8 @@ class Method(Base):
                     punctuation = re.sub('\s*!=\s*', ' != ', punctuation)
                     punctuation = re.sub('\s*!\s*', ' not ', punctuation)
                     punctuation = re.sub('\s*:\s*', ' COLON ', punctuation)
+                    punctuation = re.sub('\s+', ' ', punctuation)
                     source.append(punctuation)
-
-                # TODO: &&, ||, << ...
             else:
                 source.append(spelling)
 
@@ -767,7 +781,8 @@ def prune_classes(classes):
     return clsdict
 
 
-def parse(source_path, args=None, index=None, python_base_namespace=None):
+def parse(source_path, args=None, index=None, python_base_namespace=None,
+          base_identifier_map=None):
     if python_base_namespace is None:
         python_base_namespace = {}
 
@@ -829,6 +844,10 @@ def parse(source_path, args=None, index=None, python_base_namespace=None):
     all_classes = []
 
     functions = FunctionContainer(root)
+
+    if base_identifier_map:
+        functions.identifier_map.update(base_identifier_map)
+
     all_classes.append(functions)
 
     for cursor in find_classes(root):
