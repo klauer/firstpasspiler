@@ -266,8 +266,12 @@ class Method(Base):
 
         if reference_source == body:
             return '\n'.join(body)
-        else:
-            return '\n'.join((textwrap.indent(reference_source, '# '), body))
+
+        return '\n'.join(
+            (textwrap.indent(reference_source, '# C: ',
+                             predicate=lambda line: True),
+             body)
+        )
 
     def convert_tokenized_source(self, cursor):
         source = []
